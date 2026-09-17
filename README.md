@@ -35,3 +35,27 @@ spec:
 Because files are addressed by exact `pathInRepo`, the folder layout above is a convention for
 readability, not a resolver requirement. Pipelines in `pipelines/` resolve their tasks from
 `tasks/` in this same repository.
+
+## Multi-Version Testing
+
+Pipelines support testing different MTA versions via parameters rather than separate branches:
+
+- **koncur tests**: Use `koncurBranch` parameter (default: `main`, override for older versions)
+- **UI E2E tests**: Use `uiTestBranch` parameter (default: `main`, override for older versions)
+
+Example ITS for MTA 8.2 (tests from release-0.10 branch):
+```yaml
+apiVersion: appstudio.redhat.com/v1beta2
+kind: IntegrationTestScenario
+spec:
+  params:
+    - name: uiTestBranch
+      value: "release-0.10"
+  resolverRef:
+    resolver: git
+    params:
+      - name: revision
+        value: main  # Always use main - version controlled via parameters
+      - name: pathInRepo
+        value: pipelines/mta-fbc-e2e-pipeline.yaml
+```
