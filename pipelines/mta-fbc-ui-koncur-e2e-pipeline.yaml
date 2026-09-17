@@ -1,10 +1,11 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: mta-fbc-e2e-pipeline
+  name: mta-fbc-ui-koncur-e2e-pipeline
 spec:
   description: |
-    Deploy MTA operator from FBC catalog to a leased pool cluster and run E2E tests.
+    Deploy MTA operator from FBC catalog to a leased pool cluster and run UI and koncur E2E tests.
+    Runs both UI Cypress tests and koncur hub tests sequentially on the same cluster for efficiency.
     Uses OCPCTL cluster pools for instant access to pre-provisioned clusters.
     Faster than ephemeral clusters (no 15-30 min provision wait).
 
@@ -18,6 +19,10 @@ spec:
       default: "ci-sno-pool-1"
     - name: uiTestBranch
       description: Branch of mta-tackle2-ui to use for UI E2E tests
+      type: string
+      default: "main"
+    - name: koncurBranch
+      description: Branch of konveyor/koncur to use for koncur hub tests
       type: string
       default: "main"
 
@@ -34,12 +39,15 @@ spec:
     - name: DEPLOYMENT_STATUS
       description: Operator deployment status
       value: $(tasks.deploy-operator.results.deploymentStatus)
-    - name: TEST_OUTPUT
-      description: Test execution result
+    - name: UI_TEST_OUTPUT
+      description: UI E2E test execution result
       value: $(tasks.run-e2e-tests.results.testStatus)
     - name: DAST_SCAN
       description: DAST security scan result
       value: $(tasks.run-dast-scan.results.scanStatus)
+    - name: KONCUR_TEST_OUTPUT
+      description: Koncur hub test execution result
+      value: $(tasks.run-koncur-hub-tests.results.testStatus)
 
   tasks:
     - name: parse-metadata
@@ -208,6 +216,28 @@ spec:
           - name: pathInRepo
             value: tasks/run-ui-e2e-tests.yaml
 
+    - name: run-koncur-hub-tests
+      runAfter:
+        - run-e2e-tests
+      when:
+        - input: "run"
+          operator: in
+          values: ["run"] # Set to "skip" to skip koncur tests
+      params:
+        - name: uiRoute
+          value: $(tasks.deploy-operator.results.uiRoute)
+        - name: koncurBranch
+          value: $(params.koncurBranch)
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/migtools/mta-konflux-its
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/run-koncur-hub-tests.yaml
+
   finally:
     - name: release-cluster
       when:
@@ -232,14 +262,16 @@ spec:
         - input: "run"
           operator: in
           values: ["run"] # Set to "skip" to disable Slack notifications during testing
-        - input: "$(tasks.run-dast-scan.status)"
+        - input: "$(tasks.run-koncur-hub-tests.status)"
           operator: in
-          values: ["Succeeded", "Failed"] # Only send if DAST scan actually ran (means tests executed)
+          values: ["Succeeded", "Failed"] # Only send if koncur tests ran
       params:
         - name: testStatus
           value: "$(tasks.run-e2e-tests.status)"
         - name: dastStatus
           value: "$(tasks.run-dast-scan.status)"
+        - name: koncurStatus
+          value: "$(tasks.run-koncur-hub-tests.status)"
         - name: operatorNVR
           value: "$(tasks.extract-operator-nvr.results.operatorNVR)"
         - name: snapshotJson
@@ -248,6 +280,8 @@ spec:
           value: "$(context.pipelineRun.name)"
         - name: testBranch
           value: "$(params.uiTestBranch)"
+        - name: koncurBranch
+          value: "$(params.koncurBranch)"
       taskRef:
         resolver: git
         params:
