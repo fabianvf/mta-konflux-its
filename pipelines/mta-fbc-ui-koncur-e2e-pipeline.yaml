@@ -55,6 +55,9 @@ spec:
     - name: AGENTIC_SETUP
       description: Agentic fixtures (emulator, Gateway, application) setup result
       value: $(tasks.setup-agentic.results.setupStatus)
+    - name: AGENTIC_UI_TEST_OUTPUT
+      description: Agentic run UI E2E test execution result
+      value: $(tasks.run-agentic-e2e-tests.results.testStatus)
     - name: KONCUR_TEST_OUTPUT
       description: Koncur hub test execution result
       value: $(tasks.run-koncur-tests.results.testStatus)
@@ -236,6 +239,31 @@ spec:
           - name: pathInRepo
             value: tasks/setup-agentic.yaml
 
+    - name: run-agentic-e2e-tests
+      # Its own run of the UI task rather than a tag added to run-e2e-tests:
+      # the spec needs the fixtures setup-agentic creates, and those are only
+      # there once the other suites are done.
+      runAfter:
+        - setup-agentic
+      params:
+        - name: uiRoute
+          value: $(tasks.deploy-operator.results.uiRoute)
+        - name: gitRepository
+          value: https://github.com/migtools/mta-tackle2-ui.git
+        - name: gitBranch
+          value: main
+        - name: testTags
+          value: "@agentic"
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/migtools/mta-konflux-its
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/run-ui-e2e-tests.yaml
+
     - name: run-dast-scan
       runAfter:
         - deploy-operator
@@ -339,6 +367,8 @@ spec:
           value: "$(tasks.verify-agentic-sanity.status)"
         - name: agenticSetupStatus
           value: "$(tasks.setup-agentic.status)"
+        - name: agenticE2eStatus
+          value: "$(tasks.run-agentic-e2e-tests.status)"
         - name: operatorNVR
           value: "$(tasks.extract-operator-nvr.results.operatorNVR)"
         - name: snapshotJson

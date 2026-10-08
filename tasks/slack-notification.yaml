@@ -34,6 +34,10 @@ spec:
       type: string
       default: "None"
       description: Agentic fixtures setup status (Succeeded/Failed/None)
+    - name: agenticE2eStatus
+      type: string
+      default: "None"
+      description: Agentic run UI E2E test status (Succeeded/Failed/None)
     - name: operatorNVR
       type: string
       default: "unknown"
@@ -79,6 +83,7 @@ spec:
         KONCUR_STATUS="$(params.koncurStatus)"
         AGENTIC_SANITY_STATUS="$(params.agenticSanityStatus)"
         AGENTIC_SETUP_STATUS="$(params.agenticSetupStatus)"
+        AGENTIC_E2E_STATUS="$(params.agenticE2eStatus)"
         OPERATOR_NVR="$(params.operatorNVR)"
         SNAPSHOT_JSON='$(params.snapshotJson)'
         PIPELINE_RUN="$(params.pipelineRunName)"
@@ -132,7 +137,7 @@ spec:
         echo "UI Tests: $UI_TEST_STATUS"
         echo "DAST Scan: $DAST_STATUS"
         echo "Koncur Tests: $KONCUR_STATUS"
-        echo "Agentic: sanity=$AGENTIC_SANITY_STATUS setup=$AGENTIC_SETUP_STATUS"
+        echo "Agentic: sanity=$AGENTIC_SANITY_STATUS setup=$AGENTIC_SETUP_STATUS e2e=$AGENTIC_E2E_STATUS"
 
         # UI test status - emoji for pass/fail, text for skipped
         if [ "$UI_TEST_STATUS" = "Succeeded" ]; then
@@ -161,13 +166,15 @@ spec:
           KONCUR_STATUS_TEXT="SKIPPED"
         fi
 
-        # Agentic status - the two tasks reported as one line, since a reader
-        # wants "did the agentic side work", and either failing means no.
+        # Agentic status - the three tasks reported as one line, since a reader
+        # wants "did the agentic side work", and any of them failing means no.
         if [ "$AGENTIC_SANITY_STATUS" = "Succeeded" ] && \
-           [ "$AGENTIC_SETUP_STATUS" = "Succeeded" ]; then
+           [ "$AGENTIC_SETUP_STATUS" = "Succeeded" ] && \
+           [ "$AGENTIC_E2E_STATUS" = "Succeeded" ]; then
           AGENTIC_STATUS_TEXT=":white_check_mark:"
         elif [ "$AGENTIC_SANITY_STATUS" = "Failed" ] || \
-             [ "$AGENTIC_SETUP_STATUS" = "Failed" ]; then
+             [ "$AGENTIC_SETUP_STATUS" = "Failed" ] || \
+             [ "$AGENTIC_E2E_STATUS" = "Failed" ]; then
           AGENTIC_STATUS_TEXT=":x:"
         else
           AGENTIC_STATUS_TEXT="SKIPPED"
