@@ -30,7 +30,7 @@ spec:
       description: Name of the Tackle CR
     - name: ocpctlUrl
       type: string
-      default: "https://ocpctl.mg.dog8code.com/api/v1"
+      default: "https://ocpctl.apps.cnv2.engineering.redhat.com/api/v1"
       description: OCPCTL API base URL
     - name: ocpctlSecretName
       type: string
@@ -69,9 +69,18 @@ spec:
         TACKLE="$(params.tackleName)"
 
         echo "Downloading kubeconfig for cluster: $CLUSTER_ID"
-        HTTP=$(curl -s -o /credentials/kubeconfig -w '%{http_code}' \
-          -H "Authorization: Bearer $OCPCTL_API_KEY" \
-          "$OCPCTL_URL/clusters/$CLUSTER_ID/kubeconfig")
+        # The same two steps as deploy-mta-operator: OCPCTL hands out a
+        # pre-signed URL, and the kubeconfig comes from that.
+        RESPONSE=$(curl -s -H "Authorization: Bearer $OCPCTL_API_KEY" \
+          "$OCPCTL_URL/clusters/$CLUSTER_ID/kubeconfig/download-url")
+        DOWNLOAD_URL=$(echo "$RESPONSE" | grep -o '"download_url":"[^"]*"' \
+          | cut -d'"' -f4 | sed 's/\\u0026/\&/g' || true)
+        if [ -z "$DOWNLOAD_URL" ]; then
+          echo "❌ Failed to get kubeconfig download URL"
+          echo "Response: $RESPONSE"
+          exit 1
+        fi
+        HTTP=$(curl -s -o /credentials/kubeconfig -w '%{http_code}' "$DOWNLOAD_URL")
         if [ "$HTTP" != "200" ] || [ ! -s /credentials/kubeconfig ]; then
           echo "❌ Failed to download kubeconfig (HTTP $HTTP)"
           exit 1
@@ -135,8 +144,10 @@ spec:
         # inside a filter is not valid jsonpath, and it fails at parse time,
         # which is quiet enough to look like a pass.
         NOT_READY=""
-        for agent in $(oc get agents.konveyor.io -n "$NAMESPACE" \
-          -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'); do
+        AGENTS=$(oc get agents.konveyor.io -n "$NAMESPACE" \
+          -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' || true)
+        [ -n "$AGENTS" ] || fail "no agents listed"
+        for agent in $AGENTS; do
           STATUS=$(oc get agents.konveyor.io "$agent" -n "$NAMESPACE" -o \
             jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
           [ "$STATUS" = "True" ] || NOT_READY="${NOT_READY}${agent}(${STATUS:-none}) "

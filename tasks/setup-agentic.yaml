@@ -38,11 +38,12 @@ spec:
       description: Repo holding the agentic setup scripts
     - name: operatorRef
       type: string
-      default: "main"
+      default: "8366b30215573d89359baf22c724bd0b74c5a86f"
       description: |
-        Ref to take the scripts from. A downstream pipeline pinning an upstream
-        ref is deliberate: pin a tag or a commit to stop an upstream change
-        turning this red for reasons unrelated to the snapshot under test.
+        Commit to take the scripts from, konveyor/operator#626 by default.
+        Pinned so an upstream change cannot turn this red for reasons unrelated
+        to the snapshot under test. Move it on purpose, when the scripts change
+        in a way this pipeline needs.
     - name: appName
       type: string
       default: "agentic-e2e"
@@ -53,7 +54,7 @@ spec:
       description: Repository that application points at
     - name: ocpctlUrl
       type: string
-      default: "https://ocpctl.mg.dog8code.com/api/v1"
+      default: "https://ocpctl.apps.cnv2.engineering.redhat.com/api/v1"
       description: OCPCTL API base URL
     - name: ocpctlSecretName
       type: string
@@ -96,9 +97,18 @@ spec:
         CLUSTER_ID="$(params.clusterId)"
 
         echo "Downloading kubeconfig for cluster: $CLUSTER_ID"
-        HTTP=$(curl -s -o /credentials/kubeconfig -w '%{http_code}' \
-          -H "Authorization: Bearer $OCPCTL_API_KEY" \
-          "$OCPCTL_URL/clusters/$CLUSTER_ID/kubeconfig")
+        # The same two steps as deploy-mta-operator: OCPCTL hands out a
+        # pre-signed URL, and the kubeconfig comes from that.
+        RESPONSE=$(curl -s -H "Authorization: Bearer $OCPCTL_API_KEY" \
+          "$OCPCTL_URL/clusters/$CLUSTER_ID/kubeconfig/download-url")
+        DOWNLOAD_URL=$(echo "$RESPONSE" | grep -o '"download_url":"[^"]*"' \
+          | cut -d'"' -f4 | sed 's/\\u0026/\&/g' || true)
+        if [ -z "$DOWNLOAD_URL" ]; then
+          echo "❌ Failed to get kubeconfig download URL"
+          echo "Response: $RESPONSE"
+          exit 1
+        fi
+        HTTP=$(curl -s -o /credentials/kubeconfig -w '%{http_code}' "$DOWNLOAD_URL")
         if [ "$HTTP" != "200" ] || [ ! -s /credentials/kubeconfig ]; then
           echo "❌ Failed to download kubeconfig (HTTP $HTTP)"
           exit 1
@@ -133,24 +143,29 @@ spec:
         # carrying a token through the pipeline.
         AUTH_WAS=$(oc get tackle "$(params.tackleName)" -n "$(params.namespace)" \
           -o jsonpath='{.spec.feature_auth_required}' 2>/dev/null || echo "")
+        restore_auth() {
+          oc patch tackle "$(params.tackleName)" -n "$(params.namespace)" --type=merge \
+            -p '{"spec":{"feature_auth_required":"true"}}'
+          oc rollout status deployment/mta-hub -n "$(params.namespace)" --timeout=300s
+        }
         if [ "${AUTH_WAS}" = "true" ]; then
+          # Registered before auth is dropped, so no exit from here on, a
+          # failed seed or a failed rollout included, leaves the Hub open.
+          trap restore_auth EXIT
           oc patch tackle "$(params.tackleName)" -n "$(params.namespace)" --type=merge \
             -p '{"spec":{"feature_auth_required":"false"}}'
           oc rollout status deployment/mta-hub -n "$(params.namespace)" --timeout=300s
         fi
 
-        SEED_RC=0
         NAMESPACE="$(params.namespace)" \
         APP_NAME="$(params.appName)" \
         APP_REPO="$(params.appRepo)" \
-          /tmp/op/test/e2e/seed-application.sh || SEED_RC=$?
+          /tmp/op/test/e2e/seed-application.sh
 
         if [ "${AUTH_WAS}" = "true" ]; then
-          oc patch tackle "$(params.tackleName)" -n "$(params.namespace)" --type=merge \
-            -p '{"spec":{"feature_auth_required":"true"}}'
-          oc rollout status deployment/mta-hub -n "$(params.namespace)" --timeout=300s
+          restore_auth
+          trap - EXIT
         fi
-        [ "${SEED_RC}" -eq 0 ] || exit "${SEED_RC}"
 
         echo -n "SUCCESS" > $(results.setupStatus.path)
 

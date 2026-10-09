@@ -191,8 +191,10 @@ spec:
           value: $(tasks.parse-metadata.results.component-container-image)
         - name: snapshotJson
           value: $(params.SNAPSHOT)
+        # "false" when the sandbox did not install, so the Tackle CR does not
+        # park at AgentSandboxMissing and the other suites run as before.
         - name: agenticEnabled
-          value: "true"
+          value: $(tasks.install-agent-sandbox.results.agenticEnabled)
       taskRef:
         resolver: git
         params:
@@ -210,6 +212,10 @@ spec:
       # setup-agentic seeds into the same Hub the other suites are using.
       runAfter:
         - run-e2e-tests
+      when:
+        - input: "$(tasks.install-agent-sandbox.results.installStatus)"
+          operator: in
+          values: ["SUCCESS"]
       params:
         - name: clusterId
           value: $(tasks.lease-cluster.results.clusterId)
@@ -226,6 +232,10 @@ spec:
     - name: setup-agentic
       runAfter:
         - verify-agentic-sanity
+      when:
+        - input: "$(tasks.install-agent-sandbox.results.installStatus)"
+          operator: in
+          values: ["SUCCESS"]
       params:
         - name: clusterId
           value: $(tasks.lease-cluster.results.clusterId)
@@ -245,6 +255,10 @@ spec:
       # there once the other suites are done.
       runAfter:
         - setup-agentic
+      when:
+        - input: "$(tasks.install-agent-sandbox.results.installStatus)"
+          operator: in
+          values: ["SUCCESS"]
       params:
         - name: uiRoute
           value: $(tasks.deploy-operator.results.uiRoute)
@@ -363,6 +377,8 @@ spec:
           value: "$(tasks.run-dast-scan.status)"
         - name: koncurStatus
           value: "$(tasks.run-koncur-tests.status)"
+        - name: agenticInstallStatus
+          value: "$(tasks.install-agent-sandbox.results.installStatus)"
         - name: agenticSanityStatus
           value: "$(tasks.verify-agentic-sanity.status)"
         - name: agenticSetupStatus

@@ -20,6 +20,12 @@ spec:
     on a release cadence of its own. The newest non-expiring tag for the
     cluster's version is resolved at run time.
 
+    This task never fails. None of that is the snapshot under test, and the
+    agentic suites are extra coverage rather than a release gate, so a failed
+    install is reported in the results and the pipeline goes on without
+    agentic: deploy-operator takes agenticEnabled from here and the agentic
+    tasks are guarded on installStatus.
+
   params:
     - name: clusterId
       type: string
@@ -38,7 +44,7 @@ spec:
       description: FBC repository, suffixed with the cluster's OCP minor
     - name: ocpctlUrl
       type: string
-      default: "https://ocpctl.mg.dog8code.com/api/v1"
+      default: "https://ocpctl.apps.cnv2.engineering.redhat.com/api/v1"
       description: OCPCTL API base URL
     - name: ocpctlSecretName
       type: string
@@ -48,6 +54,10 @@ spec:
   results:
     - name: installStatus
       description: Install status (SUCCESS or FAILED)
+    - name: agenticEnabled
+      description: >-
+        "true" if the install succeeded, else "false". The value for
+        agentic_enabled on the Tackle CR.
     - name: fbcImage
       description: The Agent Sandbox FBC image that was used
 
@@ -74,15 +84,35 @@ spec:
         # Write both results up front. A declared result that is never written
         # leaves the TaskRun reporting missing results instead of the failure.
         echo -n "FAILED" > $(results.installStatus.path)
+        echo -n "false" > $(results.agenticEnabled.path)
         echo -n "" > $(results.fbcImage.path)
+
+        # Every exit below, set -e included, leaves through here and becomes
+        # a 0. The results written above are what say it failed.
+        soft_fail() {
+          if ! grep -q SUCCESS $(results.installStatus.path); then
+            echo "⚠️  Agent Sandbox did not install. Continuing without agentic."
+          fi
+          exit 0
+        }
+        trap soft_fail EXIT
 
         OCPCTL_URL="$(params.ocpctlUrl)"
         CLUSTER_ID="$(params.clusterId)"
 
         echo "Downloading kubeconfig for cluster: $CLUSTER_ID"
-        HTTP=$(curl -s -o /credentials/kubeconfig -w '%{http_code}' \
-          -H "Authorization: Bearer $OCPCTL_API_KEY" \
-          "$OCPCTL_URL/clusters/$CLUSTER_ID/kubeconfig")
+        # The same two steps as deploy-mta-operator: OCPCTL hands out a
+        # pre-signed URL, and the kubeconfig comes from that.
+        RESPONSE=$(curl -s -H "Authorization: Bearer $OCPCTL_API_KEY" \
+          "$OCPCTL_URL/clusters/$CLUSTER_ID/kubeconfig/download-url")
+        DOWNLOAD_URL=$(echo "$RESPONSE" | grep -o '"download_url":"[^"]*"' \
+          | cut -d'"' -f4 | sed 's/\\u0026/\&/g' || true)
+        if [ -z "$DOWNLOAD_URL" ]; then
+          echo "❌ Failed to get kubeconfig download URL"
+          echo "Response: $RESPONSE"
+          exit 1
+        fi
+        HTTP=$(curl -s -o /credentials/kubeconfig -w '%{http_code}' "$DOWNLOAD_URL")
         if [ "$HTTP" != "200" ] || [ ! -s /credentials/kubeconfig ]; then
           echo "❌ Failed to download kubeconfig (HTTP $HTTP)"
           exit 1
@@ -104,9 +134,15 @@ spec:
 
         repo, prefix = os.environ["REPO"], os.environ["TAG_PREFIX"]
         url = ("https://quay.io/api/v1/repository/%s/tag/"
-               "?limit=100&onlyActiveTags=true" % repo)
-        with urllib.request.urlopen(url, timeout=60) as r:
-            tags = json.load(r).get("tags") or []
+               "?limit=100&onlyActiveTags=true&page=%d")
+        tags, page = [], 1
+        while True:
+            with urllib.request.urlopen(url % (repo, page), timeout=60) as r:
+                body = json.load(r)
+            tags += body.get("tags") or []
+            if not body.get("has_additional"):
+                break
+            page += 1
 
         skip = ("-source", ".att", ".sbom", ".sig")
         cands = [t for t in tags
@@ -156,9 +192,6 @@ spec:
         # would test the previous FBC.
         echo "Waiting for the agent-sandbox CSV to install..."
         for i in $(seq 1 90); do
-          PHASE=$(oc get csv -n openshift-operators \
-            -o jsonpath='{.items[?(@.spec.displayName)].status.phase}' 2>/dev/null \
-            | tr ' ' '\n' | sort -u | tr '\n' ' ')
           if oc get csv -n openshift-operators 2>/dev/null \
              | grep -i "agent-sandbox" | grep -q Succeeded; then
             break
@@ -181,4 +214,5 @@ spec:
         fi
 
         echo "✅ Agent Sandbox installed and the CRD is present"
+        echo -n "true" > $(results.agenticEnabled.path)
         echo -n "SUCCESS" > $(results.installStatus.path)
