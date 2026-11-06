@@ -64,12 +64,13 @@ spec:
       description: Repo holding the solution server tests
     - name: kaiRef
       type: string
-      default: "main"
+      default: "1a47a4d529313a7fdb5ed0e07c2c88d06bd51a1a"
       description: |
-        Branch, tag or commit to take the kai_mcp_solution_server tests from.
-        Needs konveyor/kai's external-server mount-path fix (the deployed
-        server serves at /api, and the stress test used to drop the path);
-        pin to the commit that lands it once it merges.
+        Commit to take the kai_mcp_solution_server tests from. Pinned to
+        konveyor/kai#946's merge, which added the mount-path fix the
+        concurrency leg needs (the deployed server serves at /api, and the
+        stress test used to drop the path). Move it on purpose when the
+        tests change upstream, the same rule as operatorRef.
     - name: numConcurrentClients
       type: string
       default: "30"
@@ -224,6 +225,26 @@ spec:
               break
             fi
           done
+        fi
+
+        # The kai-api deployment ships no readiness probe, so rollout status
+        # reports success while the container crash-loops (this is exactly how
+        # the greenlet breakage shipped). Wait on the Ready condition of the
+        # current replicaset's pods - the pod-template-hash lives on the
+        # ReplicaSet, not the Deployment's own template, and a label-only wait
+        # would also match leftover terminating pods from the previous image.
+        if [ "$FAILURES" -eq 0 ]; then
+          KAI_HASH="$(kubectl get replicaset -n "$NAMESPACE" -l app=kai-api \
+            --sort-by=.metadata.creationTimestamp --no-headers \
+            -o custom-columns='HASH:.spec.template.metadata.labels.pod-template-hash' | tail -1)"
+          if ! kubectl wait --for=condition=Ready pod \
+              -l "app=kai-api,pod-template-hash=${KAI_HASH}" \
+              -n "$NAMESPACE" --timeout=300s; then
+            echo "❌ kai-api pod never became Ready (crash loop suspicion)"
+            kubectl get pods -n "$NAMESPACE" -l app=kai-api -o wide || true
+            kubectl logs deployment/kai-api -n "$NAMESPACE" --tail=30 || true
+            FAILURES=1
+          fi
         fi
 
         if [ "$FAILURES" -eq 0 ]; then
