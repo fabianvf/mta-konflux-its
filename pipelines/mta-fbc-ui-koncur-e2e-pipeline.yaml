@@ -317,6 +317,8 @@ spec:
           value: "$(tasks.run-solution-server-tests.results.llmProxyStatus)"
         - name: solutionServerConcurrencyStatus
           value: "$(tasks.run-solution-server-tests.results.concurrencyStatus)"
+        - name: solutionServerTaskStatus
+          value: "$(tasks.run-solution-server-tests.status)"
         - name: operatorNVR
           value: "$(tasks.extract-operator-nvr.results.operatorNVR)"
         - name: snapshotJson

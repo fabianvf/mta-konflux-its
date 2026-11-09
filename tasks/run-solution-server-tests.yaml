@@ -100,7 +100,10 @@ spec:
 
   steps:
     - name: run-tests
-      image: python:3.12-slim
+      # python:3.12 (not -slim): the slim image ships no curl, and the first
+      # thing this task does is fetch the kubeconfig over HTTPS. The full
+      # Debian image has curl, python 3.12, and enough shell for the rest.
+      image: python:3.12
       volumeMounts:
         - name: credentials
           mountPath: /credentials
@@ -262,7 +265,12 @@ spec:
         # the sed keeps the upstream test logic otherwise verbatim.
         if [ "$FAILURES" -eq 0 ]; then
           echo "Running llm proxy tests..."
-          curl -sfL -o /tmp/test-llm-proxy.sh \
+          # Write FAILED before the fetches: with the up-front default of
+        # SKIPPED, a failed download or sed would otherwise leave the leg
+        # reporting SKIPPED in Slack - the same class of lie as the pip
+        # installs sitting outside the if in the concurrency leg.
+        echo -n "FAILED" > $(results.llmProxyStatus.path)
+        curl -sfL -o /tmp/test-llm-proxy.sh \
             "$RAW_OPERATOR/test/e2e/llm-proxy/test-llm-proxy.sh"
           sed -i -e 's/tackle-hub/mta-hub/g' -e 's/tackle-ui/mta-ui/g' \
             /tmp/test-llm-proxy.sh
@@ -300,11 +308,15 @@ spec:
           PF_PID=$!
 
           # Any HTTP answer (including a 4xx from a GET at the MCP endpoint)
-          # means the tunnel is up; 000 means it is not.
+          # means the tunnel is up; 000 means it is not. On connection
+          # failure curl still writes 000 via -w and exits non-zero, so
+          # `|| true` keeps set -e from killing the step while leaving CODE
+          # as the single 000 - an `|| echo 000` would append a second one
+          # and the comparison would never match.
           TUNNEL=""
           for i in $(seq 1 30); do
-            CODE=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/api || echo 000)
-            if [ "$CODE" != "000" ]; then
+            CODE=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/api || true)
+            if [ -n "$CODE" ] && [ "$CODE" != "000" ]; then
               TUNNEL="up"
               break
             fi
