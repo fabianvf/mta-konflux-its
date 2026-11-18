@@ -311,12 +311,6 @@ spec:
           value: "$(tasks.run-dast-scan.status)"
         - name: koncurStatus
           value: "$(tasks.run-koncur-tests.status)"
-        - name: solutionServerDeployStatus
-          value: "$(tasks.run-solution-server-tests.results.deployStatus)"
-        - name: solutionServerLlmProxyStatus
-          value: "$(tasks.run-solution-server-tests.results.llmProxyStatus)"
-        - name: solutionServerConcurrencyStatus
-          value: "$(tasks.run-solution-server-tests.results.concurrencyStatus)"
         - name: solutionServerTaskStatus
           value: "$(tasks.run-solution-server-tests.status)"
         - name: operatorNVR

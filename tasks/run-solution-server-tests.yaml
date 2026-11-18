@@ -218,8 +218,34 @@ spec:
         fi
 
         if [ "$FAILURES" -eq 0 ]; then
+          # The Successful condition can still read True from the reconcile
+          # before the patch, so it does not prove the operator has seen the
+          # change. These deployments only exist once it has - wait for them
+          # to appear before asking rollout status, which fails NotFound
+          # against a deployment that was never created.
+          echo "Waiting for the kai deployments to be created..."
+          for deployment in kai-db kai-api llm-proxy; do
+            waited=0
+            until kubectl get deployment "$deployment" -n "$NAMESPACE" >/dev/null 2>&1; do
+              if [ "$waited" -ge 600 ]; then
+                echo "❌ deployment/$deployment was not created"
+                kubectl get tackles.tackle.konveyor.io "$TACKLE" -n "$NAMESPACE" \
+                  -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' || true
+                FAILURES=1
+                break
+              fi
+              sleep 10
+              waited=$((waited + 10))
+            done
+            [ "$FAILURES" -eq 0 ] || break
+          done
+        fi
+
+        if [ "$FAILURES" -eq 0 ]; then
+          # mta-hub is restarted by the patch (KAI_URL env) and the llm-proxy
+          # leg goes through the hub, so it belongs in this wait too.
           echo "Waiting for the kai components to roll out..."
-          for deployment in kai-db kai-api llm-proxy llemulator; do
+          for deployment in kai-db kai-api llm-proxy llemulator mta-hub; do
             if ! kubectl rollout status "deployment/$deployment" -n "$NAMESPACE" --timeout=600s; then
               echo "❌ deployment/$deployment did not roll out"
               kubectl get pods -n "$NAMESPACE" -o wide || true
