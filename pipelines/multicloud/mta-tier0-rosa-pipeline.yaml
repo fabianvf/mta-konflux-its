@@ -1,26 +1,34 @@
 apiVersion: tekton.dev/v1
 kind: Pipeline
 metadata:
-  name: mta-multicloud-tier0-pipeline
+  name: mta-tier0-rosa-pipeline
 spec:
   description: |
-    MTA Tier-0 UI Tests on Multicloud Platforms
+    MTA Tier-0 UI Tests on ROSA
 
-    Provisions fresh cluster (ARO/ROSA/ROSA-STS/OCP-AWS), deploys MTA operator
-    from Konflux snapshot, runs tier-0 UI tests, and destroys the cluster.
+    Provisions fresh ROSA cluster, deploys MTA operator from Konflux snapshot,
+    runs tier-0 UI tests, and destroys the cluster.
 
   params:
     - name: SNAPSHOT
       description: Application Snapshot JSON (provided by ITS)
       type: string
     - name: clusterType
-      description: Cluster type (aro, rosa, rosa-sts, ocp-aws)
+      description: Cluster type to test (aro, rosa, rosa-sts, or ocp-aws)
       type: string
-      default: "aro"
+      default: "rosa"
     - name: uiTestBranch
       description: Branch of mta-tackle2-ui to use for tier0 tests (auto-detected from MTA version if empty)
       type: string
       default: ""
+    - name: existingClusterId
+      description: Use existing cluster instead of provisioning (for debugging) - leave empty to provision new cluster
+      type: string
+      default: ""
+    - name: allowedDays
+      description: Days of week to run tests (comma-separated, e.g., "Monday,Wednesday,Friday" or "all" to run every day)
+      type: string
+      default: "Monday"
 
   results:
     - name: OPERATOR_NVR
@@ -37,25 +45,84 @@ spec:
       value: $(tasks.run-tier0-tests.results.testStatus)
 
   tasks:
-    # Parse snapshot metadata (extracts FBC component image)
-    - name: parse-metadata
+    # Check if today is an allowed day for testing
+    - name: check-day-of-week
       params:
-        - name: SNAPSHOT
+        - name: allowedDays
+          value: $(params.allowedDays)
+      taskSpec:
+        params:
+          - name: allowedDays
+            type: string
+        results:
+          - name: shouldRun
+            description: "true if tests should run today, false to skip"
+        steps:
+          - name: check
+            image: registry.access.redhat.com/ubi9/ubi:9.5
+            script: |
+              #!/bin/bash
+              set -euo pipefail
+
+              ALLOWED_DAYS='$(params.allowedDays)'
+              CURRENT_DAY=$(date +%A)
+
+              echo "============================================"
+              echo "Day-of-Week Filter"
+              echo "============================================"
+              echo "Current day: $CURRENT_DAY"
+              echo "Allowed days: $ALLOWED_DAYS"
+              echo ""
+
+              # If "all", always run
+              if [ "$ALLOWED_DAYS" = "all" ]; then
+                echo "✅ RUNNING TESTS (allowed every day)"
+                echo -n "true" > $(results.shouldRun.path)
+                exit 0
+              fi
+
+              # Check if current day is in allowed list
+              if echo ",$ALLOWED_DAYS," | grep -qi ",$CURRENT_DAY,"; then
+                echo "✅ RUNNING TESTS ($CURRENT_DAY is in allowed list)"
+                echo -n "true" > $(results.shouldRun.path)
+              else
+                echo "⏭️  SKIPPING TESTS ($CURRENT_DAY is not in allowed list)"
+                echo "   Tests only run on: $ALLOWED_DAYS"
+                echo "============================================"
+                echo -n "false" > $(results.shouldRun.path)
+              fi
+
+    # Extract FBC image from snapshot (doesn't require component label)
+    - name: extract-fbc-image
+      runAfter:
+        - check-day-of-week
+      when:
+        - input: "$(tasks.check-day-of-week.results.shouldRun)"
+          operator: in
+          values: ["true"]
+      timeout: 3m
+      params:
+        - name: snapshotJson
           value: $(params.SNAPSHOT)
       taskRef:
         resolver: git
         params:
           - name: url
-            value: https://github.com/konflux-ci/integration-examples
+            value: https://github.com/migtools/mta-konflux-its
           - name: revision
-            value: a1a70b0a1cfc96f5216d472fbd60f6b42780b3e5
+            value: main
           - name: pathInRepo
-            value: tasks/test_metadata.yaml
+            value: tasks/extract-fbc-image.yaml
 
     # Filter by OCP version - only allow tier0 tests on 4.22
     - name: filter-ocp-version
       runAfter:
-        - parse-metadata
+        - extract-fbc-image
+      when:
+        - input: "$(tasks.check-day-of-week.results.shouldRun)"
+          operator: in
+          values: ["true"]
+      timeout: 10m
       params:
         - name: pipelineRunName
           value: $(context.pipelineRun.name)
@@ -75,6 +142,10 @@ spec:
     - name: extract-operator-nvr
       runAfter:
         - filter-ocp-version
+      when:
+        - input: "$(tasks.check-day-of-week.results.shouldRun)"
+          operator: in
+          values: ["true"]
       params:
         - name: snapshotJson
           value: $(params.SNAPSHOT)
@@ -93,7 +164,11 @@ spec:
     # Determine test branch (use parameter if provided, otherwise auto-detect from MTA version)
     - name: map-test-branch
       runAfter:
-        - parse-metadata
+        - extract-fbc-image
+      when:
+        - input: "$(tasks.check-day-of-week.results.shouldRun)"
+          operator: in
+          values: ["true"]
       params:
         - name: snapshotJson
           value: $(params.SNAPSHOT)
@@ -109,7 +184,7 @@ spec:
           - name: testBranch
         steps:
           - name: extract-and-map
-            image: registry.access.redhat.com/ubi9/ubi-minimal:latest
+            image: registry.access.redhat.com/ubi9/ubi:9.5
             script: |
               #!/bin/bash
               set -euo pipefail
@@ -152,6 +227,12 @@ spec:
 
     # Map cluster configuration (profile, region, timeout)
     - name: map-cluster-config
+      runAfter:
+        - filter-ocp-version
+      when:
+        - input: "$(tasks.check-day-of-week.results.shouldRun)"
+          operator: in
+          values: ["true"]
       params:
         - name: clusterType
           value: $(params.clusterType)
@@ -170,15 +251,23 @@ spec:
       runAfter:
         - extract-operator-nvr
         - map-cluster-config
+      when:
+        - input: "$(tasks.check-day-of-week.results.shouldRun)"
+          operator: in
+          values: ["true"]
+        - input: "$(params.existingClusterId)"
+          operator: in
+          values: [""]
+      timeout: 1h30m
       params:
         - name: clusterName
           value: $(context.pipelineRun.name)
+        - name: clusterType
+          value: $(tasks.map-cluster-config.results.clusterType)
         - name: profile
           value: $(tasks.map-cluster-config.results.profile)
         - name: platform
           value: $(tasks.map-cluster-config.results.platform)
-        - name: clusterType
-          value: $(tasks.map-cluster-config.results.clusterType)
         - name: version
           value: $(tasks.map-cluster-config.results.version)
         - name: region
@@ -203,11 +292,12 @@ spec:
         - input: "$(tasks.provision-cluster.results.provisionStatus)"
           operator: in
           values: ["READY"]
+      timeout: 30m
       params:
         - name: clusterId
           value: $(tasks.provision-cluster.results.clusterId)
         - name: fbcImage
-          value: $(tasks.parse-metadata.results.component-container-image)
+          value: $(tasks.extract-fbc-image.results.fbcImage)
         - name: snapshotJson
           value: $(params.SNAPSHOT)
         - name: configureRegistryMirror
@@ -226,6 +316,11 @@ spec:
     - name: run-tier0-tests
       runAfter:
         - deploy-operator
+      when:
+        - input: "$(tasks.check-day-of-week.results.shouldRun)"
+          operator: in
+          values: ["true"]
+      timeout: 20m
       params:
         - name: uiRoute
           value: $(tasks.deploy-operator.results.uiRoute)
@@ -244,17 +339,14 @@ spec:
             value: tasks/run-ui-e2e-tests.yaml
 
   finally:
-    # Destroy cluster after tests complete
+    # Destroy cluster after tests complete (runs regardless of pipeline success/failure)
     - name: destroy-cluster
-      when:
-        - input: "$(tasks.provision-cluster.status)"
-          operator: in
-          values: ["Succeeded"]
+      timeout: 30m
       params:
         - name: clusterId
           value: $(tasks.provision-cluster.results.clusterId)
         - name: clusterName
-          value: $(tasks.provision-cluster.results.clusterName)
+          value: $(context.pipelineRun.uid)
       taskRef:
         resolver: git
         params:
@@ -265,25 +357,25 @@ spec:
           - name: pathInRepo
             value: tasks/ocpctl-cleanup.yaml
 
-    # Send Slack notification
+    # Send Slack notification (only if tests actually ran)
     - name: send-slack-notification
       when:
         - input: "$(tasks.run-tier0-tests.status)"
           operator: in
-          values: ["Succeeded", "Failed", "None"]
+          values: ["Succeeded", "Failed"]
       params:
-        - name: testStatus
-          value: $(tasks.run-tier0-tests.status)
         - name: clusterType
           value: $(params.clusterType)
         - name: clusterTypeLabel
           value: $(tasks.map-cluster-config.results.clusterTypeLabel)
-        - name: snapshotName
-          value: $(tasks.parse-metadata.results.application-name)
-        - name: operatorNVR
-          value: $(tasks.extract-operator-nvr.results.operatorNVR)
+        - name: testStatus
+          value: $(tasks.run-tier0-tests.status)
         - name: clusterId
           value: $(tasks.provision-cluster.results.clusterId)
+        - name: snapshotName
+          value: $(tasks.extract-fbc-image.results.applicationName)
+        - name: operatorNVR
+          value: $(tasks.extract-operator-nvr.results.operatorNVR)
         - name: pipelineRunName
           value: $(context.pipelineRun.name)
         - name: triggeredBy

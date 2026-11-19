@@ -76,7 +76,7 @@ spec:
 
   steps:
     - name: create-cluster
-      image: registry.access.redhat.com/ubi9/ubi@sha256:e79f79172a6779775e1733cb4f49cd5ef03a0703c68ec46c717f93b9ac4a5e71
+      image: registry.access.redhat.com/ubi9/ubi:9.5
       env:
         - name: OCPCTL_API_KEY
           valueFrom:
@@ -179,7 +179,7 @@ spec:
         echo -n "$CLUSTER_ID" > $(results.clusterId.path)
 
     - name: wait-for-ready
-      image: registry.access.redhat.com/ubi9/ubi@sha256:e79f79172a6779775e1733cb4f49cd5ef03a0703c68ec46c717f93b9ac4a5e71
+      image: registry.access.redhat.com/ubi9/ubi:9.5
       env:
         - name: OCPCTL_API_KEY
           valueFrom:
@@ -274,15 +274,15 @@ spec:
             fi
 
             echo -n "FAILED" > $(results.provisionStatus.path)
-            # Do NOT exit 1 - we need clusterId available for cleanup
-            exit 0
+            # Exit 1 to fail the task and pipeline (clusterId is still available to finally tasks)
+            exit 1
           fi
 
           if [ $ELAPSED -ge $TIMEOUT ]; then
             echo "❌ Timed out waiting for cluster. Last status: $STATUS"
             echo -n "TIMEOUT" > $(results.provisionStatus.path)
-            # Do NOT exit 1 - we need clusterId available for cleanup
-            exit 0
+            # Exit 1 to fail the task and pipeline (clusterId is still available to finally tasks)
+            exit 1
           fi
 
           sleep $INTERVAL
