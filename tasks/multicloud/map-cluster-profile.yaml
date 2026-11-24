@@ -1,0 +1,108 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: map-cluster-profile
+  labels:
+    app.kubernetes.io/version: "0.1"
+  annotations:
+    tekton.dev/pipelines.minVersion: "0.12.1"
+    tekton.dev/categories: Utility
+    tekton.dev/tags: multicloud,ocpctl,cluster
+    tekton.dev/displayName: "Map Cluster Type to OCPCTL Profile"
+spec:
+  description: >-
+    Maps cluster type (aro, rosa, rosa-sts, ocp-aws) to OCPCTL profile name,
+    region, and provisioning timeout.
+
+  params:
+    - name: clusterType
+      type: string
+      description: Cluster type (aro, rosa, rosa-sts, ocp-aws)
+
+  results:
+    - name: profile
+      description: OCPCTL profile name
+    - name: platform
+      description: Cloud platform (aws, azure, gcp)
+    - name: clusterType
+      description: OCPCTL cluster type (rosa, aro, openshift)
+    - name: version
+      description: OpenShift version for this profile
+    - name: region
+      description: Default region for this cluster type
+    - name: waitTimeout
+      description: Provisioning timeout in seconds
+    - name: clusterTypeLabel
+      description: Human-readable cluster type label
+
+  steps:
+    - name: map
+      image: registry.access.redhat.com/ubi9/ubi:9.5
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+
+        CLUSTER_TYPE="$(params.clusterType)"
+
+        echo "Mapping cluster type: $CLUSTER_TYPE"
+
+        case "$CLUSTER_TYPE" in
+          aro)
+            PROFILE="aro-standard"
+            PLATFORM="azure"
+            OCPCTL_CLUSTER_TYPE="aro"
+            VERSION="4.21"
+            REGION="eastus"
+            TIMEOUT="3600"  # 1 hour for ARO
+            LABEL="ARO (Azure Red Hat OpenShift)"
+            ;;
+          rosa)
+            PROFILE="rosa-standard"
+            PLATFORM="aws"
+            OCPCTL_CLUSTER_TYPE="rosa"
+            VERSION="4.22"
+            REGION="us-east-1"
+            TIMEOUT="3600"  # 1 hour for ROSA
+            LABEL="ROSA (Red Hat OpenShift Service on AWS)"
+            ;;
+          rosa-sts)
+            PROFILE="rosa-standard"
+            PLATFORM="aws"
+            OCPCTL_CLUSTER_TYPE="rosa"
+            VERSION="4.22"
+            REGION="us-east-1"
+            TIMEOUT="3600"  # 1 hour for ROSA-STS
+            LABEL="ROSA-STS (ROSA with STS)"
+            ;;
+          ocp-aws)
+            PROFILE="aws-sno-ga"
+            PLATFORM="aws"
+            OCPCTL_CLUSTER_TYPE="openshift"
+            VERSION="4.22"
+            REGION="us-east-1"
+            TIMEOUT="3600"  # 1 hour for OCP on AWS
+            LABEL="OCP-AWS (OpenShift on AWS)"
+            ;;
+          *)
+            echo "❌ Unknown cluster type: $CLUSTER_TYPE"
+            echo "Valid types: aro, rosa, rosa-sts, ocp-aws"
+            exit 1
+            ;;
+        esac
+
+        echo "✅ Mapped cluster type:"
+        echo "  Profile: $PROFILE"
+        echo "  Platform: $PLATFORM"
+        echo "  Cluster Type: $OCPCTL_CLUSTER_TYPE"
+        echo "  Version: $VERSION"
+        echo "  Region: $REGION"
+        echo "  Timeout: ${TIMEOUT}s"
+        echo "  Label: $LABEL"
+
+        echo -n "$PROFILE" > $(results.profile.path)
+        echo -n "$PLATFORM" > $(results.platform.path)
+        echo -n "$OCPCTL_CLUSTER_TYPE" > $(results.clusterType.path)
+        echo -n "$VERSION" > $(results.version.path)
+        echo -n "$REGION" > $(results.region.path)
+        echo -n "$TIMEOUT" > $(results.waitTimeout.path)
+        echo -n "$LABEL" > $(results.clusterTypeLabel.path)

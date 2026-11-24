@@ -1,0 +1,391 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  name: mta-tier0-rosa-pipeline
+spec:
+  description: |
+    MTA Tier-0 UI Tests on ROSA
+
+    Provisions fresh ROSA cluster, deploys MTA operator from Konflux snapshot,
+    runs tier-0 UI tests, and destroys the cluster.
+
+  params:
+    - name: SNAPSHOT
+      description: Application Snapshot JSON (provided by ITS)
+      type: string
+    - name: clusterType
+      description: Cluster type to test (aro, rosa, rosa-sts, or ocp-aws)
+      type: string
+      default: "rosa"
+    - name: uiTestBranch
+      description: Branch of mta-tackle2-ui to use for tier0 tests (auto-detected from MTA version if empty)
+      type: string
+      default: ""
+    - name: existingClusterId
+      description: Use existing cluster instead of provisioning (for debugging) - leave empty to provision new cluster
+      type: string
+      default: ""
+    - name: allowedDays
+      description: Days of week to run tests (comma-separated, e.g., "Monday,Wednesday,Friday" or "all" to run every day)
+      type: string
+      default: "Monday"
+
+  results:
+    - name: OPERATOR_NVR
+      description: Operator NVR tested
+      value: $(tasks.extract-operator-nvr.results.operatorNVR)
+    - name: CLUSTER_ID
+      description: Cluster ID
+      value: $(tasks.provision-cluster.results.clusterId)
+    - name: DEPLOYMENT_STATUS
+      description: Operator deployment status
+      value: $(tasks.deploy-operator.results.deploymentStatus)
+    - name: TEST_STATUS
+      description: Tier-0 test result
+      value: $(tasks.run-tier0-tests.results.testStatus)
+
+  tasks:
+    # Check if today is an allowed day for testing
+    - name: check-day-of-week
+      params:
+        - name: allowedDays
+          value: $(params.allowedDays)
+      taskSpec:
+        params:
+          - name: allowedDays
+            type: string
+        results:
+          - name: shouldRun
+            description: "true if tests should run today, false to skip"
+        steps:
+          - name: check
+            image: registry.access.redhat.com/ubi9/ubi:9.5
+            script: |
+              #!/bin/bash
+              set -euo pipefail
+
+              ALLOWED_DAYS='$(params.allowedDays)'
+              CURRENT_DAY=$(date +%A)
+
+              echo "============================================"
+              echo "Day-of-Week Filter"
+              echo "============================================"
+              echo "Current day: $CURRENT_DAY"
+              echo "Allowed days: $ALLOWED_DAYS"
+              echo ""
+
+              # If "all", always run
+              if [ "$ALLOWED_DAYS" = "all" ]; then
+                echo "✅ RUNNING TESTS (allowed every day)"
+                echo -n "true" > $(results.shouldRun.path)
+                exit 0
+              fi
+
+              # Check if current day is in allowed list
+              if echo ",$ALLOWED_DAYS," | grep -qi ",$CURRENT_DAY,"; then
+                echo "✅ RUNNING TESTS ($CURRENT_DAY is in allowed list)"
+                echo -n "true" > $(results.shouldRun.path)
+              else
+                echo "⏭️  SKIPPING TESTS ($CURRENT_DAY is not in allowed list)"
+                echo "   Tests only run on: $ALLOWED_DAYS"
+                echo "============================================"
+                echo -n "false" > $(results.shouldRun.path)
+              fi
+
+    # Extract FBC image from snapshot (doesn't require component label)
+    - name: extract-fbc-image
+      runAfter:
+        - check-day-of-week
+      when:
+        - input: "$(tasks.check-day-of-week.results.shouldRun)"
+          operator: in
+          values: ["true"]
+      timeout: 3m
+      params:
+        - name: snapshotJson
+          value: $(params.SNAPSHOT)
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/migtools/mta-konflux-its
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/extract-fbc-image.yaml
+
+    # Filter by OCP version - only allow tier0 tests on 4.22
+    - name: filter-ocp-version
+      runAfter:
+        - extract-fbc-image
+      when:
+        - input: "$(tasks.check-day-of-week.results.shouldRun)"
+          operator: in
+          values: ["true"]
+      timeout: 10m
+      params:
+        - name: pipelineRunName
+          value: $(context.pipelineRun.name)
+        - name: allowedOcpVersions
+          value: "4.22"
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/migtools/mta-konflux-its
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/filter-ocp-version.yaml
+
+    # Extract operator NVR for reporting
+    - name: extract-operator-nvr
+      runAfter:
+        - filter-ocp-version
+      when:
+        - input: "$(tasks.check-day-of-week.results.shouldRun)"
+          operator: in
+          values: ["true"]
+      params:
+        - name: snapshotJson
+          value: $(params.SNAPSHOT)
+        - name: pipelineRunName
+          value: $(context.pipelineRun.name)
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/migtools/mta-konflux-its
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/extract-operator-nvr.yaml
+
+    # Determine test branch (use parameter if provided, otherwise auto-detect from MTA version)
+    - name: map-test-branch
+      runAfter:
+        - extract-fbc-image
+      when:
+        - input: "$(tasks.check-day-of-week.results.shouldRun)"
+          operator: in
+          values: ["true"]
+      params:
+        - name: snapshotJson
+          value: $(params.SNAPSHOT)
+        - name: uiTestBranch
+          value: $(params.uiTestBranch)
+      taskSpec:
+        params:
+          - name: snapshotJson
+            type: string
+          - name: uiTestBranch
+            type: string
+        results:
+          - name: testBranch
+        steps:
+          - name: extract-and-map
+            image: registry.access.redhat.com/ubi9/ubi:9.5
+            script: |
+              #!/bin/bash
+              set -euo pipefail
+
+              UI_TEST_BRANCH='$(params.uiTestBranch)'
+
+              # If branch explicitly provided, use it
+              if [ -n "$UI_TEST_BRANCH" ]; then
+                echo "Using explicitly provided test branch: $UI_TEST_BRANCH"
+                echo -n "$UI_TEST_BRANCH" > $(results.testBranch.path)
+                exit 0
+              fi
+
+              # Otherwise, auto-detect from snapshot
+              echo "Auto-detecting test branch from MTA version..."
+              SNAPSHOT='$(params.snapshotJson)'
+
+              # Extract application name (e.g., fbc-mta-8-3)
+              APP_NAME=$(echo "$SNAPSHOT" | grep -o '"application":"[^"]*"' | cut -d'"' -f4)
+              echo "Application: $APP_NAME"
+
+              # Extract version (fbc-mta-8-3 → 8.3)
+              VERSION=$(echo "$APP_NAME" | grep -oE '[0-9]+-[0-9]+' | tr '-' '.')
+              echo "MTA version: $VERSION"
+
+              # Map to test branch
+              case "$VERSION" in
+                8.0) BRANCH="release-0.8" ;;
+                8.1) BRANCH="release-0.9" ;;
+                8.2) BRANCH="release-0.10" ;;
+                8.3) BRANCH="release-0.11" ;;
+                *)
+                  echo "ERROR: No test branch mapping for version $VERSION"
+                  exit 1
+                  ;;
+              esac
+
+              echo "Mapped to test branch: $BRANCH"
+              echo -n "$BRANCH" > $(results.testBranch.path)
+
+    # Map cluster configuration (profile, region, timeout)
+    - name: map-cluster-config
+      runAfter:
+        - filter-ocp-version
+      when:
+        - input: "$(tasks.check-day-of-week.results.shouldRun)"
+          operator: in
+          values: ["true"]
+      params:
+        - name: clusterType
+          value: $(params.clusterType)
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/migtools/mta-konflux-its
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/multicloud/map-cluster-profile.yaml
+
+    # Provision fresh cluster via OCPCTL
+    - name: provision-cluster
+      runAfter:
+        - extract-operator-nvr
+        - map-cluster-config
+      when:
+        - input: "$(tasks.check-day-of-week.results.shouldRun)"
+          operator: in
+          values: ["true"]
+        - input: "$(params.existingClusterId)"
+          operator: in
+          values: [""]
+      timeout: 1h30m
+      params:
+        - name: clusterName
+          value: $(context.pipelineRun.name)
+        - name: clusterType
+          value: $(tasks.map-cluster-config.results.clusterType)
+        - name: profile
+          value: $(tasks.map-cluster-config.results.profile)
+        - name: platform
+          value: $(tasks.map-cluster-config.results.platform)
+        - name: version
+          value: $(tasks.map-cluster-config.results.version)
+        - name: region
+          value: $(tasks.map-cluster-config.results.region)
+        - name: waitTimeout
+          value: $(tasks.map-cluster-config.results.waitTimeout)
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/migtools/mta-konflux-its
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/multicloud/ocpctl-provision.yaml
+
+    # Deploy MTA operator (uses multicloud task for ROSA/ARO)
+    - name: deploy-operator
+      runAfter:
+        - provision-cluster
+      when:
+        - input: "$(tasks.provision-cluster.results.provisionStatus)"
+          operator: in
+          values: ["READY"]
+      timeout: 30m
+      params:
+        - name: clusterId
+          value: $(tasks.provision-cluster.results.clusterId)
+        - name: fbcImage
+          value: $(tasks.extract-fbc-image.results.fbcImage)
+        - name: snapshotJson
+          value: $(params.SNAPSHOT)
+        - name: configureRegistryMirror
+          value: "true"  # IDMS setup for stage registry mirrors
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/migtools/mta-konflux-its
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/multicloud/deploy-mta-operator-multicloud.yaml
+
+    # Run tier-0 UI tests
+    - name: run-tier0-tests
+      runAfter:
+        - deploy-operator
+      when:
+        - input: "$(tasks.check-day-of-week.results.shouldRun)"
+          operator: in
+          values: ["true"]
+      timeout: 20m
+      params:
+        - name: uiRoute
+          value: $(tasks.deploy-operator.results.uiRoute)
+        - name: testTags
+          value: "@tier0"
+        - name: gitBranch
+          value: $(tasks.map-test-branch.results.testBranch)
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/migtools/mta-konflux-its
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/run-ui-e2e-tests.yaml
+
+  finally:
+    # Destroy cluster after tests complete (runs regardless of pipeline success/failure)
+    - name: destroy-cluster
+      timeout: 30m
+      params:
+        - name: clusterId
+          value: $(tasks.provision-cluster.results.clusterId)
+        - name: clusterName
+          value: $(context.pipelineRun.uid)
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/migtools/mta-konflux-its
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/ocpctl-cleanup.yaml
+
+    # Send Slack notification (only if tests actually ran)
+    - name: send-slack-notification
+      when:
+        - input: "$(tasks.run-tier0-tests.status)"
+          operator: in
+          values: ["Succeeded", "Failed"]
+      params:
+        - name: clusterType
+          value: $(params.clusterType)
+        - name: clusterTypeLabel
+          value: $(tasks.map-cluster-config.results.clusterTypeLabel)
+        - name: testStatus
+          value: $(tasks.run-tier0-tests.status)
+        - name: clusterId
+          value: $(tasks.provision-cluster.results.clusterId)
+        - name: snapshotName
+          value: $(tasks.extract-fbc-image.results.applicationName)
+        - name: operatorNVR
+          value: $(tasks.extract-operator-nvr.results.operatorNVR)
+        - name: pipelineRunName
+          value: $(context.pipelineRun.name)
+        - name: triggeredBy
+          value: "its"
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/migtools/mta-konflux-its
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: tasks/multicloud/slack-notification-tier0.yaml
